@@ -61,8 +61,8 @@
 -export_type([accesslist/0]).
 
 -record(state,
-	{sock_mod = gen_udp                :: gen_udp | gen_tcp | fast_tls,
-	 sock                              :: inet:socket() | fast_tls:tls_socket() | undefined,
+	{sock_mod = gen_udp                :: gen_udp | gen_tcp | fast_tls | ssl,
+	 sock                              :: inet:socket() | fast_tls:tls_socket() | ssl:sslsocket() | undefined,
 	 addr = {{0,0,0,0}, 0}             :: addr(),
 	 owner = self()                    :: pid(),
 	 username = <<"">>                 :: binary(),

@@ -137,8 +137,8 @@ accept(Transport, ListenSocket, Opts) ->
 			      [stun_logger:encode_addr({PeerAddr, PeerPort}),
 			       stun_logger:encode_addr({Addr, Port})]),
 		    case stun:start({gen_tcp, Socket}, Opts2) of
-			{ok, Pid} ->
-			    gen_tcp:controlling_process(Socket, Pid);
+			{ok, _Pid} ->
+			    ok;
 			{error, Reason} ->
 			    ?LOG_NOTICE("Cannot start connection: ~s", [Reason]),
 			    gen_tcp:close(Socket)
@@ -159,8 +159,8 @@ accept(Transport, ListenSocket, Opts) ->
 			      [stun_logger:encode_addr({PeerAddr, PeerPort}),
 			       stun_logger:encode_addr({Addr, Port})]),
 		    case stun:start({gen_tcp, Socket}, Opts1) of
-			{ok, Pid} ->
-			    gen_tcp:controlling_process(Socket, Pid);
+			{ok, _Pid} ->
+			    ok;
 			{error, Reason} ->
 			    ?LOG_NOTICE("Cannot start connection: ~s",
 					[Reason]),

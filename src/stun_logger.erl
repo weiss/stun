@@ -29,7 +29,7 @@
 
 -type sub_domain() :: listener | stun | turn.
 -type transport() :: udp | tcp | tls | auto.
--type sock_mod() :: gen_udp | gen_tcp | fast_tls.
+-type sock_mod() :: gen_udp | gen_tcp | fast_tls | ssl.
 
 %% API.
 
@@ -188,7 +188,8 @@ encode_transport(tls) -> <<"TLS">>;
 encode_transport(auto) -> <<"TCP|TLS">>;
 encode_transport(gen_udp) -> <<"UDP">>;
 encode_transport(gen_tcp) -> <<"TCP">>;
-encode_transport(fast_tls) -> <<"TLS">>.
+encode_transport(fast_tls) -> <<"TLS">>;
+encode_transport(ssl) -> <<"TLS">>.
 
 %% Internal functions.
 

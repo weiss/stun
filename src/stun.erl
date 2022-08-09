@@ -44,7 +44,8 @@
 	 code_change/4]).
 
 %% gen_fsm states
--export([session_established/2]).
+-export([wait_for_activation/2,
+	 session_established/2]).
 
 %% helper functions
 -export([rand_uniform/0, rand_uniform/1, rand_uniform/2, unmap_v4_addr/1]).
@@ -56,13 +57,14 @@
 -define(TIMEOUT, 60000). %% 1 minute
 -define(TCP_ACTIVE, 500).
 -define(NONCE_LIFETIME, 60*1000*1000). %% 1 minute (in usec)
+-define(DEFAULT_TLS_SOCK_MOD, fast_tls).
 -define(SERVER_NAME, <<"P1 STUN library">>).
 
 -type addr() :: {inet:ip_address(), inet:port_number()}.
 
 -record(state,
-	{sock                        :: inet:socket() | fast_tls:tls_socket() | undefined,
-	 sock_mod = gen_tcp          :: gen_udp | gen_tcp | fast_tls,
+	{sock                        :: inet:socket() | fast_tls:tls_socket() | ssl:sslsocket() | undefined,
+	 sock_mod = gen_tcp          :: gen_udp | gen_tcp | fast_tls | ssl,
 	 peer = {{0,0,0,0}, 0}       :: addr(),
 	 tref                        :: reference() | undefined,
 	 use_turn = false            :: boolean(),
@@ -88,7 +90,18 @@
 %% API
 %%====================================================================
 start({gen_tcp, Sock}, Opts) ->
-    supervisor:start_child(stun_tmp_sup, [Sock, Opts]).
+    case supervisor:start_child(stun_tmp_sup, [Sock, Opts]) of
+	{ok, Pid} = Res ->
+	    case gen_tcp:controlling_process(Sock, Pid) of
+		ok ->
+		    ?GEN_FSM:send_event(Pid, {activate, Opts}),
+		    Res;
+		{error, _Reason} = Err ->
+		    Err
+	    end;
+	{error, _Reason} = Err ->
+	    Err
+    end.
 
 stop(Pid) ->
     ?GEN_FSM:send_all_state_event(Pid, stop).
@@ -126,20 +139,24 @@ init([Sock, Opts]) ->
 	    case get_sockmod(Opts, Sock) of
 		{ok, SockMod} ->
 		    State = prepare_state(Opts, Sock, Addr, SockMod),
-		    case maybe_starttls(Sock, SockMod, Opts) of
-			{ok, NewSock} ->
-			    TRef = erlang:start_timer(?TIMEOUT, self(), stop),
-			    NewState = State#state{sock = NewSock, tref = TRef},
-			    activate_socket(NewState),
-			    {ok, session_established, NewState};
-			{error, Reason} ->
-			    {stop, Reason}
-		    end;
+		    TRef = erlang:start_timer(?TIMEOUT, self(), stop),
+		    {ok, wait_for_activation, State#state{tref = TRef}};
 		{error, Reason} ->
 		    {stop, Reason}
 	    end;
 	{error, Reason} ->
 	    {stop, Reason}
+    end.
+
+wait_for_activation({activate, Opts},
+		    #state{sock = Sock, sock_mod = SockMod} = State) ->
+    case maybe_starttls(Sock, SockMod, Opts) of
+	{ok, NewSock} ->
+	    NewState = State#state{sock = NewSock},
+	    activate_socket(NewState),
+	    {next_state, session_established, NewState};
+	{error, Reason} ->
+	    {stop, Reason, State}
     end.
 
 session_established(Event, State) ->
@@ -164,16 +181,24 @@ handle_info({tcp, _Sock, TLSData}, StateName,
 	    ?LOG_INFO("Connection failure: ~s", [Reason]),
 	    {stop, normal, NewState}
     end;
-handle_info({tcp, _Sock, Data}, StateName, State) ->
+handle_info({Tag, _Sock, Data}, StateName, State)
+  when Tag == tcp;
+       Tag == ssl ->
     NewState = update_shaper(State, Data),
     process_data(StateName, NewState, Data);
-handle_info({tcp_passive, _Sock}, StateName, State) ->
+handle_info({Tag, _Sock}, StateName, State)
+  when Tag == tcp_passive;
+       Tag == ssl_passive ->
     activate_socket(State),
     {next_state, StateName, State};
-handle_info({tcp_closed, _Sock}, _StateName, State) ->
+handle_info({Tag, _Sock}, _StateName, State)
+  when Tag == tcp_closed;
+       Tag == ssl_closed ->
     ?LOG_INFO("Connection reset by peer"),
     {stop, normal, State};
-handle_info({tcp_error, _Sock, _Reason}, _StateName, State) ->
+handle_info({Tag, _Sock, _Reason}, _StateName, State)
+  when Tag == tcp_error;
+       Tag == ssl_error ->
     ?LOG_INFO("Connection error: ~p", [_Reason]),
     {stop, normal, State};
 handle_info({timeout, TRef, stop}, _StateName,
@@ -618,6 +643,7 @@ prepare_state(Opts, Sock, Peer, SockMod) when is_list(Opts) ->
 		 ({protocol_options, _}, State) -> State;
 		 ({tls, _}, State) -> State;
 		 (tls, State) -> State;
+		 ({tls_sock_mod, _}, State) -> State;
 		 ({proxy_protocol, _}, State) -> State;
 		 (proxy_protocol, State) -> State;
 		 ({sock_peer_name, _}, State) -> State;
@@ -752,19 +778,22 @@ is_valid_subnet(_) ->
 get_sockmod(Opts, Sock) ->
     case proplists:get_value(tls, Opts, false) of
 	true ->
-	    {ok, fast_tls};
+	    {ok, get_tls_sockmod(Opts)};
 	false ->
 	    {ok, gen_tcp};
 	optional ->
 	    case is_tls_handshake(Sock) of
 		true ->
-		    {ok, fast_tls};
+		    {ok, get_tls_sockmod(Opts)};
 		false ->
 		    {ok, gen_tcp};
 		{error, _Reason} = Err ->
 		    Err
 	    end
     end.
+
+get_tls_sockmod(Opts) ->
+    proplists:get_value(tls_sock_mod, Opts, ?DEFAULT_TLS_SOCK_MOD).
 
 get_peername(Sock, Opts) ->
     case proplists:get_value(sock_peer_name, Opts) of
@@ -810,6 +839,25 @@ maybe_starttls(Sock, fast_tls, Opts) ->
 				false
 			end, Opts),
 	    fast_tls:tcp_to_tls(Sock, [verify_none | TLSOpts]);
+	false ->
+	    ?LOG_ERROR("Cannot accept TLS connection: "
+		       "option 'certfile' is not set"),
+	    {error, eprotonosupport}
+    end;
+maybe_starttls(Sock, ssl, Opts) ->
+    case proplists:is_defined(certfile, Opts) of
+	true ->
+	    TLSOpts = lists:filter(
+			fun({certfile, _Val}) ->
+				true;
+			%   ({dhfile, _Val}) ->
+			%	true;
+			%   ({ciphers, _Val}) ->
+			%	true;
+			   (_Opt) ->
+				false
+			end, Opts),
+	    ssl:handshake(Sock, [{active, false} | TLSOpts], ?TIMEOUT);
 	false ->
 	    ?LOG_ERROR("Cannot accept TLS connection: "
 		       "option 'certfile' is not set"),
